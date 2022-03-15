@@ -49,6 +49,7 @@ class EditContext:
         self._pre_repack_hooks = []
         self._mounts = []
         self._squash_mounts = {}
+        self._copy_on_teardown = None
 
     def log(self, msg):
         print(self._indent + msg)
@@ -196,13 +197,25 @@ class EditContext:
         for mount in reversed(self._mounts):
             run(['mount', '--make-rprivate', mount])
             run(['umount', '-R', mount])
+
+        if self._copy_on_teardown:
+            with self.logged("copy contents to mountpoint now"):
+                run(['cp', '-aT', self.p('new/iso'), self._copy_on_teardown])
         shutil.rmtree(self.dir)
 
-    def mount_iso(self):
-        self._iso_overlay = self.add_overlay(
-            self.add_mount(
+    def mount_iso(self, already_mounted=False):
+        if not already_mounted:
+            mountpoint = self.add_mount(
                 'iso9660', self.iso_path, self.p('old/iso'),
-                options='loop,ro'),
+                options='loop,ro')
+        else:
+            os.makedirs(self.p('old'), exist_ok=True)
+            os.symlink(self.iso_path, self.p('old/iso'))
+            mountpoint = Mountpoint(
+                device=self.iso_path, mountpoint=self.p('old/iso'))
+
+        self._iso_overlay = self.add_overlay(
+            mountpoint,
             self.p('new/iso'))
 
     def repack_iso(self, destpath):
@@ -220,3 +233,13 @@ class EditContext:
         with self.logged("recreating ISO"):
             run(['xorriso', '-as', 'mkisofs'] + opts +
                 ['-o', destpath, '-V', 'Ubuntu custom', self.p('new/iso')])
+
+    def repack_in_mounted(self, destpath):
+        with self.logged("running repack hooks"):
+            for hook in reversed(self._pre_repack_hooks):
+                hook()
+        if self._iso_overlay.unchanged():
+            self.log("no changes!")
+            return
+        with self.logged("preparing to do the final copy"):
+            self._copy_on_teardown = destpath
